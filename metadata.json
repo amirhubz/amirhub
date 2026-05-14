@@ -1,0 +1,8 @@
+{
+  "name": "Remix: SVG Batch Resizer",
+  "description": "Resize multiple SVG images at once with aspect ratio locking and batch ZIP download.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
