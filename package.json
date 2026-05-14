@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@google/genai": "^2.2.0",
     "@mistralai/mistralai": "^1.0.0",
     "@tailwindcss/postcss": "^4.3.0",
     "framer-motion": "^12.38.0",

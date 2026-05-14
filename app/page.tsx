@@ -57,6 +57,7 @@ interface CsvRow {
   status: 'pending' | 'processing' | 'completed' | 'failed';
   error?: string;
   imagePreview?: string;
+  originalFile?: File;
 }
 
 export default function App() {
@@ -358,7 +359,8 @@ export default function App() {
       keywords: '',
       categories: '',
       status: 'pending' as const,
-      imagePreview: URL.createObjectURL(file)
+      imagePreview: URL.createObjectURL(file),
+      originalFile: file
     }));
     setCsvRows(prev => [...prev, ...newRows].slice(0, 500));
   };
@@ -388,14 +390,31 @@ export default function App() {
     });
 
     try {
+      let imageBase64 = null;
+      let mimeType = null;
+
+      if (row.originalFile) {
+        imageBase64 = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const result = reader.result as string;
+            resolve(result.split(',')[1]);
+          };
+          reader.readAsDataURL(row.originalFile!);
+        });
+        mimeType = row.originalFile.type;
+      }
+
       const response = await fetch('/api/generate-metadata', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt: `Analyze the filename: "${row.filename}". Generate microstock metadata. 
+          prompt: `Analyze the image: "${row.filename}". Generate microstock metadata. 
           Context: The image filename is ${row.filename}.`,
           customApiKey: apiKey,
-          keywordCount: kCount
+          keywordCount: kCount,
+          imageBase64,
+          mimeType
         })
       });
 
@@ -413,8 +432,8 @@ export default function App() {
               status: 'completed',
               title: data.title,
               description: data.description,
-              keywords: data.keywords.join(', '),
-              categories: data.categories.join(', ')
+              keywords: Array.isArray(data.keywords) ? data.keywords.join(', ') : data.keywords,
+              categories: Array.isArray(data.categories) ? data.categories.join(', ') : data.categories
             };
         }
         return next;
