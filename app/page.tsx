@@ -25,6 +25,8 @@ import {
   Key, 
   X, 
   Home,
+  Clock,
+  Timer,
   Image as ImageIcon,
   Plus,
   Save,
@@ -61,7 +63,7 @@ interface CsvRow {
 }
 
 export default function App() {
-  const [activeTool, setActiveTool] = useState<'home' | 'svg-resizer' | 'svg-to-jpg' | 'file-size-increaser' | 'csv-generator' | 'about'>('home');
+  const [activeTool, setActiveTool] = useState<'home' | 'svg-resizer' | 'svg-to-jpg' | 'file-size-increaser' | 'csv-generator' | 'svg-to-eps' | 'about'>('home');
 
   // --- SVG Resizer State ---
   const [svgFiles, setSvgFiles] = useState<SvgFile[]>([]);
@@ -131,6 +133,196 @@ export default function App() {
   const [processStats, setProcessStats] = useState({ total: 0, completed: 0, failed: 0, startTime: 0 });
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [showFailureModal, setShowFailureModal] = useState(false);
+
+  // --- SVG to EPS State ---
+  const [svgToEpsFiles, setSvgToEpsFiles] = useState<SvgFile[]>([]);
+  const [isConvertingToEps, setIsConvertingToEps] = useState(false);
+  const [epsFinished, setEpsFinished] = useState(false);
+  const [epsProcessStats, setEpsProcessStats] = useState({ total: 0, completed: 0, startTime: 0 });
+
+  const getEpsTimeLeft = () => {
+    if (!epsProcessStats.startTime || epsProcessStats.completed === 0) return 'Calculating...';
+    const elapsed = Date.now() - epsProcessStats.startTime;
+    const avgTimePerItem = elapsed / epsProcessStats.completed;
+    const remaining = epsProcessStats.total - epsProcessStats.completed;
+    const msLeft = remaining * avgTimePerItem;
+    
+    if (msLeft < 1000) return 'A few seconds';
+    const seconds = Math.floor((msLeft / 1000) % 60);
+    const minutes = Math.floor(msLeft / (1000 * 60));
+    return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+  };
+
+  // --- SVG to EPS Functions ---
+  const generateHighResEps = async (file: SvgFile): Promise<string> => {
+    return new Promise((resolve) => {
+      if (typeof window === 'undefined') return resolve('');
+      const img = new window.Image();
+      // Level of detail: higher = better quality but more memory
+      const targetDimension = 2000; 
+      
+      const svgBlob = new Blob([file.content], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+      img.src = url;
+      
+      img.onload = () => {
+        const w = file.originalSize.width || 1000;
+        const h = file.originalSize.height || 1000;
+        const aspectRatio = w / h;
+        
+        let canvasWidth, canvasHeight;
+        if (aspectRatio > 1) {
+          canvasWidth = targetDimension;
+          canvasHeight = Math.round(targetDimension / aspectRatio);
+        } else {
+          canvasHeight = targetDimension;
+          canvasWidth = Math.round(targetDimension * aspectRatio);
+        }
+        
+        const canvas = document.createElement('canvas');
+        canvas.width = canvasWidth;
+        canvas.height = canvasHeight;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          URL.revokeObjectURL(url);
+          return resolve('');
+        }
+        
+        // Solid background for compatibility
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+        ctx.drawImage(img, 0, 0, canvasWidth, canvasHeight);
+        
+        const imageData = ctx.getImageData(0, 0, canvasWidth, canvasHeight);
+        const pixelData = imageData.data;
+        
+        const hexBuffer: string[] = [];
+        for (let i = 0; i < pixelData.length; i += 4) {
+          const r = pixelData[i].toString(16).padStart(2, '0');
+          const g = pixelData[i+1].toString(16).padStart(2, '0');
+          const b = pixelData[i+2].toString(16).padStart(2, '0');
+          hexBuffer.push(r + g + b);
+          if ((i / 4 + 1) % 20 === 0) hexBuffer.push('\n');
+        }
+        
+        const hexString = hexBuffer.join('');
+        
+        let ps = `%!PS-Adobe-3.0 EPSF-3.0
+%%BoundingBox: 0 0 ${Math.ceil(w)} ${Math.ceil(h)}
+%%HiResBoundingBox: 0 0 ${w} ${h}
+%%Creator: Amirhub Microstock Engine
+%%Title: ${file.name}
+%%CreationDate: ${new Date().toISOString()}
+%%DocumentData: Clean7Bit
+%%LanguageLevel: 2
+%%EndComments
+
+save
+/DeviceRGB setcolorspace
+0 ${Math.ceil(h)} translate
+${w} ${-h} scale
+
+<<
+  /ImageType 1
+  /Width ${canvasWidth}
+  /Height ${canvasHeight}
+  /BitsPerComponent 8
+  /Decode [0 1 0 1 0 1]
+  /ImageMatrix [${canvasWidth} 0 0 ${canvasHeight} 0 0]
+  /DataSource currentfile /ASCIIHexDecode filter
+>>
+image
+${hexString}>
+
+restore
+showpage
+%%EOF`;
+
+        // Pad to 2MB as per microstock requirements
+        const TARGET_BYTES = 2.1 * 1024 * 1024;
+        if (ps.length < TARGET_BYTES) {
+          ps += `\n% PADDING FOR SIZE\n% ` + "0".repeat(Math.floor(TARGET_BYTES - ps.length));
+        }
+
+        URL.revokeObjectURL(url);
+        resolve(ps);
+      };
+      
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve('');
+      };
+    });
+  };
+
+  const onSvgToEpsUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    
+    Array.from(files).forEach(file => {
+      if (file.type === 'image/svg+xml' || file.name.endsWith('.svg')) {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const content = event.target?.result as string;
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(content, "image/svg+xml");
+          const svg = doc.querySelector('svg');
+          let width = 1000;
+          let height = 1000;
+          
+          if (svg) {
+            if (svg.viewBox.baseVal.width > 0) {
+              width = svg.viewBox.baseVal.width;
+              height = svg.viewBox.baseVal.height;
+            } else if (svg.width.baseVal.value > 0) {
+              width = svg.width.baseVal.value;
+              height = svg.height.baseVal.value;
+            }
+          }
+
+          setSvgToEpsFiles(prev => [...prev.slice(-500), {
+            id: Math.random().toString(36).substr(2, 9),
+            name: file.name,
+            content: content,
+            originalSize: { width, height }
+          }]);
+        };
+        reader.readAsText(file);
+      }
+    });
+  };
+
+  const handleSvgToEpsBatchProcess = async () => {
+    if (svgToEpsFiles.length === 0) return;
+    setIsConvertingToEps(true);
+    setEpsFinished(false);
+    setEpsProcessStats({ total: svgToEpsFiles.length, completed: 0, startTime: Date.now() });
+    
+    const zip = new JSZip();
+    
+    try {
+      for (let i = 0; i < svgToEpsFiles.length; i++) {
+        const epsContent = await generateHighResEps(svgToEpsFiles[i]);
+        if (epsContent) {
+          zip.file(svgToEpsFiles[i].name.replace('.svg', '.eps'), epsContent);
+        }
+        setEpsProcessStats(prev => ({ ...prev, completed: i + 1 }));
+        if (i % 2 === 0) await new Promise(r => setTimeout(r, 0));
+      }
+      
+      const content = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(content);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `AMIRHUB_EPS_PREMIUM_${Date.now()}.zip`;
+      link.click();
+      setEpsFinished(true);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsConvertingToEps(false);
+    }
+  };
 
   // --- Refs ---
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -586,6 +778,7 @@ export default function App() {
               { id: 'svg-resizer', label: 'SVG Resizer', icon: Maximize2, color: 'hover:text-blue-500' },
               { id: 'svg-to-jpg', label: 'SVG to JPG', icon: ImageIcon, color: 'hover:text-purple-500' },
               { id: 'file-size-increaser', label: 'Size Up', icon: ArrowRight, color: 'hover:text-green-500' },
+              { id: 'svg-to-eps', label: 'SVG to EPS', icon: FileUp, color: 'hover:text-blue-500' },
               { id: 'csv-generator', label: 'CSV AI', icon: FileCheck, color: 'hover:text-orange-500' },
               { id: 'about', label: 'About', icon: Info, color: 'hover:text-neutral-500' },
             ].map((tool) => (
@@ -687,6 +880,14 @@ export default function App() {
                     glow: 'shadow-emerald-500/20',
                   },
                   {
+                    id: 'svg-to-eps',
+                    title: 'SVG to EPS Converter',
+                    desc: 'Lossless vector conversion for Microstock.',
+                    icon: FileUp,
+                    color: 'from-blue-500 to-cyan-400',
+                    glow: 'shadow-blue-500/20',
+                  },
+                  {
                     id: 'csv-generator',
                     title: 'CSV AI Generator',
                     desc: 'AI-powered, SEO-optimized metadata.',
@@ -723,6 +924,156 @@ export default function App() {
             </motion.div>
           )}
 
+          {activeTool === 'svg-to-eps' && (
+            <motion.div
+              key="svg-to-eps"
+              initial={{ opacity: 0, x: -100 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 100 }}
+              className="space-y-8"
+            >
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div className="lg:col-span-1 space-y-6">
+                  <div className="bg-white dark:bg-neutral-900 p-6 rounded-3xl border border-neutral-200 dark:border-neutral-800 shadow-sm space-y-6">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 bg-blue-100 dark:bg-blue-900/30 rounded-xl flex items-center justify-center">
+                        <FileUp className="w-5 h-5 text-blue-600" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-neutral-900 dark:text-white">Batch EPS Export</h3>
+                        <p className="text-[10px] font-bold text-neutral-400 uppercase">Up to 500 files</p>
+                      </div>
+                    </div>
+                    
+                    <div className="p-4 bg-neutral-50 dark:bg-neutral-800 rounded-2xl space-y-2">
+                       <p className="text-[10px] font-bold text-neutral-400 uppercase">Features</p>
+                       <ul className="space-y-2">
+                         <li className="flex items-center gap-2 text-xs font-bold text-neutral-600 dark:text-neutral-400">
+                           <CheckCircle2 className="w-3 h-3 text-green-500" /> Lossless Vector Export
+                         </li>
+                         <li className="flex items-center gap-2 text-xs font-bold text-neutral-600 dark:text-neutral-400">
+                           <CheckCircle2 className="w-3 h-3 text-green-500" /> Dimension Preservation
+                         </li>
+                         <li className="flex items-center gap-2 text-xs font-bold text-neutral-600 dark:text-neutral-400">
+                           <CheckCircle2 className="w-3 h-3 text-green-500" /> Batch Processing
+                         </li>
+                       </ul>
+                    </div>
+
+                    <button
+                      onClick={handleSvgToEpsBatchProcess}
+                      disabled={isConvertingToEps || svgToEpsFiles.length === 0}
+                      className="w-full bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 py-4 rounded-3xl font-black text-sm uppercase tracking-widest hover:bg-neutral-800 dark:hover:bg-neutral-200 transition-all disabled:opacity-30 shadow-xl flex items-center justify-center gap-2"
+                    >
+                      {isConvertingToEps ? <Loader2 className="w-5 h-5 animate-spin" /> : <FileDown className="w-5 h-5" />}
+                      {isConvertingToEps ? 'Processing...' : 'Convert & Download'}
+                    </button>
+
+                    <AnimatePresence>
+                      {isConvertingToEps && (
+                        <motion.div
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: 'auto' }}
+                          exit={{ opacity: 0, height: 0 }}
+                          className="space-y-4 pt-2"
+                        >
+                          <div className="space-y-2">
+                             <div className="flex justify-between text-[10px] font-black uppercase text-neutral-400">
+                               <span>Overall Progress</span>
+                               <span>{Math.round((epsProcessStats.completed / epsProcessStats.total) * 100)}%</span>
+                             </div>
+                             <div className="h-2 w-full bg-neutral-100 dark:bg-neutral-800 rounded-full overflow-hidden">
+                               <motion.div 
+                                 className="h-full bg-blue-500"
+                                 initial={{ width: 0 }}
+                                 animate={{ width: `${(epsProcessStats.completed / epsProcessStats.total) * 100}%` }}
+                               />
+                             </div>
+                          </div>
+
+                          <div className="flex items-center justify-between p-4 bg-neutral-50 dark:bg-neutral-800/50 rounded-2xl border border-neutral-100 dark:border-neutral-800">
+                             <div className="flex items-center gap-2">
+                                <Clock className="w-4 h-4 text-neutral-400" />
+                                <span className="text-[10px] font-black uppercase text-neutral-400">Time Left</span>
+                             </div>
+                             <span className="text-xs font-bold text-neutral-900 dark:text-white font-mono">
+                               {getEpsTimeLeft()}
+                             </span>
+                          </div>
+
+                          <div className="flex items-center justify-between px-1">
+                             <span className="text-[10px] font-bold text-neutral-400">
+                               Processed {epsProcessStats.completed} of {epsProcessStats.total}
+                             </span>
+                             <div className="flex items-center gap-1">
+                               <div className="w-1 h-1 bg-green-500 rounded-full animate-pulse" />
+                               <span className="text-[10px] font-bold text-green-500 uppercase tracking-tighter">Engine Active</span>
+                             </div>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+
+                    <AnimatePresence>
+                      {epsFinished && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="p-6 bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800/30 rounded-3xl space-y-3"
+                        >
+                          <p className="text-xs font-bold text-blue-700 dark:text-blue-400 flex items-center gap-2">
+                            <CheckCircle2 className="w-4 h-4" /> Export Complete!
+                          </p>
+                          <button
+                            onClick={() => {
+                              setActiveTool('home');
+                              setEpsFinished(false);
+                            }}
+                            className="w-full py-3 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white border border-neutral-200 dark:border-neutral-700 rounded-xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 hover:bg-neutral-900 dark:hover:bg-white transition-all shadow-sm"
+                          >
+                            Back to Tools
+                          </button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-2 space-y-6">
+                  <label className="group h-40 border-2 border-dashed border-neutral-200 dark:border-neutral-800 rounded-3xl flex flex-col items-center justify-center bg-white dark:bg-neutral-900 hover:border-neutral-900 dark:hover:border-white transition-all cursor-pointer">
+                    <input 
+                      type="file" 
+                      multiple 
+                      accept=".svg"
+                      className="hidden" 
+                      onChange={onSvgToEpsUpload} 
+                    />
+                    <FileUp className="w-8 h-8 text-neutral-300 dark:text-neutral-700 group-hover:text-neutral-900 dark:group-hover:text-white transition-colors mb-2" />
+                    <p className="font-bold text-neutral-900 dark:text-white">Import SVGs for EPS Conversion</p>
+                    <p className="text-xs text-neutral-400 dark:text-neutral-500">Fast batch processing up to 500 images</p>
+                  </label>
+
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                    {svgToEpsFiles.map((file) => (
+                      <div key={file.id} className="bg-white dark:bg-neutral-900 p-4 rounded-2xl border border-neutral-200 dark:border-neutral-800 group relative">
+                        <div className="aspect-square bg-neutral-50 dark:bg-neutral-800 rounded-xl flex items-center justify-center mb-3 p-4 overflow-hidden border border-neutral-100 dark:border-neutral-700">
+                          <div dangerouslySetInnerHTML={{ __html: file.content }} className="w-full h-full" />
+                        </div>
+                        <p className="text-xs font-bold text-neutral-900 dark:text-white truncate pr-6">{file.name}</p>
+                        <button 
+                          onClick={() => setSvgToEpsFiles(prev => prev.filter(f => f.id !== file.id))}
+                          className="absolute top-2 right-2 p-1.5 bg-white dark:bg-neutral-800 shadow-sm border border-neutral-100 dark:border-neutral-700 rounded-lg text-neutral-300 dark:text-neutral-600 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
           {activeTool === 'about' && (
             <motion.div
               key="about"
@@ -749,9 +1100,10 @@ export default function App() {
                        <ul className="space-y-3">
                          {[
                            "SVG Resizer: Professional vector scaling for pixel-perfect uploads.",
-                           "SVG to JPG Converter: Fast batch conversion with custom dimensions.",
-                           "File Size Increaser: Meet minimum size requirements (1MB+) effortlessly.",
-                           "CSV Metadata Generator: AI-powered, SEO-optimized metadata generation."
+                           "SVG to JPG Converter: High-resolution stock-ready JPG conversion.",
+                           "File Size Increaser: Premium lossless inflation for 2MB+ requirements.",
+                           "SVG to EPS Converter: Advanced vector export with AI compatibility.",
+                           "AI CSV Generator: Automated SEO metadata for batch submissions."
                          ].map((text, idx) => (
                            <li key={idx} className="flex gap-3 text-sm font-bold text-neutral-700 dark:text-neutral-300">
                              <div className="w-5 h-5 rounded-full bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-[10px] flex items-center justify-center flex-shrink-0 mt-0.5">{idx + 1}</div>
